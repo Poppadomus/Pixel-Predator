@@ -1,0 +1,113 @@
+from ultralytics import YOLO
+import cv2
+import numpy as np
+from mss import mss
+import pygetwindow as gw
+import torch
+import time
+
+# Check CUDA availability
+print(f"CUDA Available: {torch.cuda.is_available()}")
+
+# Initialize screen capture
+sct = mss()
+
+# Load YOLO model: Using YOLO11n for latest performance
+model = YOLO("yolo11n.pt")
+
+# Adjust frame rate for CPU usage
+TARGET_FPS = 15  # Reduced for better CPU performance
+TARGET_FRAME_TIME = 1.0 / TARGET_FPS  # Time per frame in seconds
+
+# Function to get the active window's coordinates
+def get_active_window_rect():
+    try:
+        # Get the currently active window
+        window = gw.getActiveWindow()
+        if window and window.isActive:
+            # Use window coordinates directly, clamping to prevent overflow
+            left = max(0, window.left)
+            top = max(0, window.top)
+            width = min(window.width, 1920 - left)  # Fallback max width
+            height = min(window.height, 1080 - top)  # Fallback max height
+            return left, top, width, height, window.title
+        else:
+            raise Exception("No active window found.")
+    except Exception as e:
+        raise Exception(f"Error finding active window: {e}")
+
+# Create resizable OpenCV window
+cv2.namedWindow('Screen', cv2.WINDOW_NORMAL)
+
+# Main loop
+last_time = time.time()
+last_window_title = None
+while True:
+    try:
+        # Get current time for delta time calculation
+        current_time = time.time()
+        delta_time = current_time - last_time
+
+        # Only process frame if enough time has passed for target FPS
+        if delta_time >= TARGET_FRAME_TIME:
+            # Update last_time
+            last_time = current_time - (delta_time % TARGET_FRAME_TIME)
+
+            # Get active window coordinates and title
+            left, top, width, height, window_title = get_active_window_rect()
+            
+            # Update window title display if it has changed
+            if window_title != last_window_title:
+                print(f"\nCapturing window: {window_title}")
+                last_window_title = window_title
+
+            # Set monitor region for screen capture (only the active window)
+            monitor = {'top': top, 'left': left, 'width': width, 'height': height}
+
+            # Capture active window
+            img = sct.grab(monitor)
+            screen = np.array(img)
+
+            # Convert color from BGRA to BGR if needed
+            if screen.shape[2] == 4:
+                screen = cv2.cvtColor(screen, cv2.COLOR_BGRA2BGR)
+
+            # Run YOLO model on captured screen, restricting to person class (COCO ID 0)
+            results_list = model(screen, classes=[0], verbose=False)  # Only detect people
+
+            # Process results if available
+            if isinstance(results_list, list) and results_list:
+                results = results_list[0]  # Get first result
+                annotated_img = results.plot()  # Plot person detections
+                img_with_boxes = cv2.cvtColor(annotated_img, cv2.COLOR_RGB2BGR)
+
+                # Resize to match the captured window dimensions without padding
+                resized_img_with_boxes = cv2.resize(
+                    img_with_boxes,
+                    (width, height),
+                    interpolation=cv2.INTER_AREA
+                )
+
+                # Display the image in the OpenCV window, matching the window size
+                cv2.imshow('Screen', resized_img_with_boxes)
+                cv2.resizeWindow('Screen', width, height)  # Set window to exact captured size
+            else:
+                print("No people detected or no valid results from YOLO model.")
+
+            # Calculate and display FPS
+            fps = 1.0 / delta_time if delta_time > 0 else 0
+            print(f"\rFPS: {fps:.2f}", end='')
+
+        # Check for 'q' key press to exit (non-blocking)
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+    except Exception as e:
+        print(f"\nError: {e}")
+        # Brief pause to prevent rapid error looping
+        time.sleep(0.1)
+        continue  # Continue to try capturing the next active window
+
+# Cleanup
+cv2.destroyAllWindows()
+sct.close()
